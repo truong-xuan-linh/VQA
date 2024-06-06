@@ -42,8 +42,8 @@ else:
 
 if 'image' in st.session_state:
     st.image(st.session_state.image)
-    question = st.text_input("Question: ", value=st.session_state.question)
+    question = st.text_input("**Question:** ", value=st.session_state.question)
     if question:
         answer = st.session_state.model.inference(st.session_state.image, question)
-        st.write(f"Answer: {answer}")
+        st.write(f"**Answer:** {answer}")
         
