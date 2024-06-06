@@ -5,3 +5,4 @@ pillow==9.5.0
 torchvision==0.18.0
 streamlit==1.35.0
 transformers==4.41.2
+streamlit-image-select==0.6.0
