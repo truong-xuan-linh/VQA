@@ -6,3 +6,5 @@ torchvision==0.18.0
 streamlit==1.35.0
 transformers==4.41.2
 streamlit-image-select==0.6.0
+bertviz==1.4.0
+ipython==8.18.1

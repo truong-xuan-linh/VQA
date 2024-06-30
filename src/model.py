@@ -8,12 +8,16 @@ from typing import *
 from transformers import T5ForConditionalGeneration, AutoTokenizer
 from utils.config import Config
 from src.feature_extraction import ViT, OCR
+from bertviz import model_view, head_view
+from src.image_visualization import plot_attention
+import numpy as np
+from PIL import Image
 
 _CONFIG_FOR_DOC = "T5Config"
 _CHECKPOINT_FOR_DOC = "google-t5/t5-small"
 
-class CustomT5Stack(T5Stack):
 
+class CustomT5Stack(T5Stack):
     def forward(
         self,
         input_ids=None,
@@ -35,11 +39,19 @@ class CustomT5Stack(T5Stack):
             torch.cuda.set_device(self.first_device)
             self.embed_tokens = self.embed_tokens.to(self.first_device)
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         if input_ids is not None and inputs_embeds is not None:
             err_msg_prefix = "decoder_" if self.is_decoder else ""
@@ -53,11 +65,15 @@ class CustomT5Stack(T5Stack):
             input_shape = inputs_embeds.size()[:-1]
         else:
             err_msg_prefix = "decoder_" if self.is_decoder else ""
-            raise ValueError(f"You have to specify either {err_msg_prefix}input_ids or {err_msg_prefix}inputs_embeds")
+            raise ValueError(
+                f"You have to specify either {err_msg_prefix}input_ids or {err_msg_prefix}inputs_embeds"
+            )
 
         if inputs_embeds is None:
             if self.embed_tokens is None:
-                raise ValueError("You have to initialize the model with valid token embeddings")
+                raise ValueError(
+                    "You have to initialize the model with valid token embeddings"
+                )
             inputs_embeds = self.embed_tokens(input_ids)
             if not self.is_decoder and images_embeds is not None:
                 inputs_embeds = torch.concat([inputs_embeds, images_embeds], dim=1)
@@ -66,33 +82,47 @@ class CustomT5Stack(T5Stack):
         batch_size, seq_length = input_shape
 
         # required mask seq length can be calculated via length of past
-        mask_seq_length = past_key_values[0][0].shape[2] + seq_length if past_key_values is not None else seq_length
+        mask_seq_length = (
+            past_key_values[0][0].shape[2] + seq_length
+            if past_key_values is not None
+            else seq_length
+        )
 
         if use_cache is True:
             if not self.is_decoder:
-                raise ValueError(f"`use_cache` can only be set to `True` if {self} is used as a decoder")
+                raise ValueError(
+                    f"`use_cache` can only be set to `True` if {self} is used as a decoder"
+                )
 
         # initialize past_key_values with `None` if past does not exist
         if past_key_values is None:
             past_key_values = [None] * len(self.block)
 
         if attention_mask is None:
-            attention_mask = torch.ones(batch_size, mask_seq_length, device=inputs_embeds.device)
+            attention_mask = torch.ones(
+                batch_size, mask_seq_length, device=inputs_embeds.device
+            )
 
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
-        extended_attention_mask = self.get_extended_attention_mask(attention_mask, input_shape)
+        extended_attention_mask = self.get_extended_attention_mask(
+            attention_mask, input_shape
+        )
 
         # If a 2D or 3D attention mask is provided for the cross-attention
         # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
         if self.is_decoder and encoder_hidden_states is not None:
-            encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.size()
+            encoder_batch_size, encoder_sequence_length, _ = (
+                encoder_hidden_states.size()
+            )
             encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
             if encoder_attention_mask is None:
                 encoder_attention_mask = torch.ones(
                     encoder_hidden_shape, device=inputs_embeds.device, dtype=torch.long
                 )
-            encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask)
+            encoder_extended_attention_mask = self.invert_attention_mask(
+                encoder_attention_mask
+            )
         else:
             encoder_extended_attention_mask = None
 
@@ -105,7 +135,9 @@ class CustomT5Stack(T5Stack):
 
         # Prepare head mask if needed
         head_mask = self.get_head_mask(head_mask, self.config.num_layers)
-        cross_attn_head_mask = self.get_head_mask(cross_attn_head_mask, self.config.num_layers)
+        cross_attn_head_mask = self.get_head_mask(
+            cross_attn_head_mask, self.config.num_layers
+        )
         present_key_value_states = () if use_cache else None
         all_hidden_states = () if output_hidden_states else None
         all_attentions = () if output_attentions else None
@@ -115,7 +147,9 @@ class CustomT5Stack(T5Stack):
 
         hidden_states = self.dropout(inputs_embeds)
 
-        for i, (layer_module, past_key_value) in enumerate(zip(self.block, past_key_values)):
+        for i, (layer_module, past_key_value) in enumerate(
+            zip(self.block, past_key_values)
+        ):
             layer_head_mask = head_mask[i]
             cross_attn_layer_head_mask = cross_attn_head_mask[i]
             # Model parallel
@@ -127,15 +161,23 @@ class CustomT5Stack(T5Stack):
                 if position_bias is not None:
                     position_bias = position_bias.to(hidden_states.device)
                 if encoder_hidden_states is not None:
-                    encoder_hidden_states = encoder_hidden_states.to(hidden_states.device)
+                    encoder_hidden_states = encoder_hidden_states.to(
+                        hidden_states.device
+                    )
                 if encoder_extended_attention_mask is not None:
-                    encoder_extended_attention_mask = encoder_extended_attention_mask.to(hidden_states.device)
+                    encoder_extended_attention_mask = (
+                        encoder_extended_attention_mask.to(hidden_states.device)
+                    )
                 if encoder_decoder_position_bias is not None:
-                    encoder_decoder_position_bias = encoder_decoder_position_bias.to(hidden_states.device)
+                    encoder_decoder_position_bias = encoder_decoder_position_bias.to(
+                        hidden_states.device
+                    )
                 if layer_head_mask is not None:
                     layer_head_mask = layer_head_mask.to(hidden_states.device)
                 if cross_attn_layer_head_mask is not None:
-                    cross_attn_layer_head_mask = cross_attn_layer_head_mask.to(hidden_states.device)
+                    cross_attn_layer_head_mask = cross_attn_layer_head_mask.to(
+                        hidden_states.device
+                    )
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
@@ -181,10 +223,14 @@ class CustomT5Stack(T5Stack):
             # (cross-attention position bias), (cross-attention weights)
             position_bias = layer_outputs[2]
             if self.is_decoder and encoder_hidden_states is not None:
-                encoder_decoder_position_bias = layer_outputs[4 if output_attentions else 3]
+                encoder_decoder_position_bias = layer_outputs[
+                    4 if output_attentions else 3
+                ]
             # append next layer key value states
             if use_cache:
-                present_key_value_states = present_key_value_states + (present_key_value_state,)
+                present_key_value_states = present_key_value_states + (
+                    present_key_value_state,
+                )
 
             if output_attentions:
                 all_attentions = all_attentions + (layer_outputs[3],)
@@ -227,7 +273,9 @@ class CustomT5Stack(T5Stack):
 
 class CustomT5ForConditionalGeneration(T5ForConditionalGeneration):
     @add_start_docstrings_to_model_forward(T5_INPUTS_DOCSTRING)
-    @replace_return_docstrings(output_type=Seq2SeqLMOutput, config_class=_CONFIG_FOR_DOC)
+    @replace_return_docstrings(
+        output_type=Seq2SeqLMOutput, config_class=_CONFIG_FOR_DOC
+    )
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -280,7 +328,9 @@ class CustomT5ForConditionalGeneration(T5ForConditionalGeneration):
         >>> # studies have shown that owning a dog is good for you.
         ```"""
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         # FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
         if head_mask is not None and decoder_head_mask is None:
@@ -299,7 +349,7 @@ class CustomT5ForConditionalGeneration(T5ForConditionalGeneration):
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
-                images_embeds=images_embeds
+                images_embeds=images_embeds,
             )
         elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
             encoder_outputs = BaseModelOutput(
@@ -313,7 +363,11 @@ class CustomT5ForConditionalGeneration(T5ForConditionalGeneration):
         if self.model_parallel:
             torch.cuda.set_device(self.decoder.first_device)
 
-        if labels is not None and decoder_input_ids is None and decoder_inputs_embeds is None:
+        if (
+            labels is not None
+            and decoder_input_ids is None
+            and decoder_inputs_embeds is None
+        ):
             # get decoder inputs from shifting lm labels to the right
             decoder_input_ids = self._shift_right(labels)
 
@@ -326,7 +380,9 @@ class CustomT5ForConditionalGeneration(T5ForConditionalGeneration):
             if attention_mask is not None:
                 attention_mask = attention_mask.to(self.decoder.first_device)
             if decoder_attention_mask is not None:
-                decoder_attention_mask = decoder_attention_mask.to(self.decoder.first_device)
+                decoder_attention_mask = decoder_attention_mask.to(
+                    self.decoder.first_device
+                )
 
         # Decode
         decoder_outputs = self.decoder(
@@ -382,64 +438,124 @@ class CustomT5ForConditionalGeneration(T5ForConditionalGeneration):
             encoder_hidden_states=encoder_outputs.hidden_states,
             encoder_attentions=encoder_outputs.attentions,
         )
-        
+
+
 transformers.models.t5.modeling_t5.T5Stack = CustomT5Stack
-transformers.models.t5.modeling_t5.T5ForConditionalGeneration = CustomT5ForConditionalGeneration
+transformers.models.t5.modeling_t5.T5ForConditionalGeneration = (
+    CustomT5ForConditionalGeneration
+)
 transformers.T5ForConditionalGeneration = CustomT5ForConditionalGeneration
+from transformers import T5ForConditionalGeneration
 
 
 class Model:
     def __init__(self) -> None:
         os.makedirs("storage", exist_ok=True)
-        
+
         if not os.path.exists("storage/vlsp_transfomer_vietocr.pth"):
             print("DOWNLOADING model")
-            gdown.download(Config.model_url, output="storage/vlsp_transfomer_vietocr.pth")
+            gdown.download(
+                Config.model_url, output="storage/vlsp_transfomer_vietocr.pth"
+            )
         self.vit5_tokenizer = AutoTokenizer.from_pretrained("VietAI/vit5-base")
-        self.model = T5ForConditionalGeneration.from_pretrained("truong-xuan-linh/VQA-vit5",
-                                                                revision=Config.revision,
-                                                                output_attentions=True)
+        self.model = T5ForConditionalGeneration.from_pretrained(
+            "truong-xuan-linh/VQA-vit5",
+            revision=Config.revision,
+            output_attentions=True,
+        )
         self.model.to(Config.device)
 
         self.vit = ViT()
         self.ocr = OCR()
 
     def get_inputs(self, image_dir: str, question: str):
-        #VIT
+        # VIT
         image_feature, image_mask = self.vit.extraction(image_dir)
 
         ocr_content, groups_box, paragraph_boxes = self.ocr.extraction(image_dir)
         print("Input: ", question + " " + ocr_content)
-        #VIT5
-        input_ = self.vit5_tokenizer(question + " " + ocr_content,
-                    padding="max_length",
-                    truncation=True,
-                    max_length=Config.question_maxlen + Config.ocr_maxlen,
-                    return_tensors="pt")
+        # VIT5
+        input_ = self.vit5_tokenizer(
+            question + " " + ocr_content,
+            padding="max_length",
+            truncation=True,
+            max_length=Config.question_maxlen + Config.ocr_maxlen,
+            return_tensors="pt",
+        )
 
         input_ids = input_.input_ids
         attention_mask = input_.attention_mask
         mask = torch.cat((attention_mask, image_mask), 1)
         return {
-                  "input_ids": input_ids,
-                  "attention_mask": mask,
-                  "images_embeds": image_feature,
-              }
+            "input_ids": input_ids,
+            "attention_mask": mask,
+            "images_embeds": image_feature,
+        }
 
-    def inference(self, image_dir: str, question: str):
+    def inference(self, image_dir: str, question: str, explain: bool = False):
         inputs = self.get_inputs(image_dir, question)
         with torch.no_grad():
             input_ids = inputs["input_ids"]
             attention_mask = inputs["attention_mask"]
             images_embeds = inputs["images_embeds"]
             generated_ids = self.model.generate(
-                                input_ids=input_ids, \
-                                attention_mask=attention_mask, \
-                                images_embeds=images_embeds, \
-                                num_beams=2,
-                                max_length=Config.answer_maxlen
-                            )
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                images_embeds=images_embeds,
+                num_beams=2,
+                max_length=Config.answer_maxlen,
+            )
 
-            pred_answer = self.vit5_tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+            pred_answer = self.vit5_tokenizer.decode(
+                generated_ids[0], skip_special_tokens=True
+            )
+        if not explain:
+            return pred_answer, None, None
 
-        return pred_answer
+        with self.vit5_tokenizer.as_target_tokenizer():
+            decoder_input_ids = self.vit5_tokenizer(
+                pred_answer, return_tensors="pt", add_special_tokens=True
+            ).input_ids
+
+        with torch.no_grad():
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                images_embeds=images_embeds,
+                decoder_input_ids=decoder_input_ids,
+            )
+
+        encoder_text = self.vit5_tokenizer.convert_ids_to_tokens(input_ids[0])
+        decoder_text = self.vit5_tokenizer.convert_ids_to_tokens(decoder_input_ids[0])
+        while "<pad>" in encoder_text:
+            encoder_text.remove("<pad>")
+
+        text_encoder_attentions = [
+            att[:, :, : len(encoder_text), : len(encoder_text)]
+            for att in outputs.encoder_attentions
+        ]
+        text_cross_attentions = [
+            att[:, :, :, : len(encoder_text)] for att in outputs.cross_attentions
+        ]
+
+        html_output = head_view(
+            encoder_attention=text_encoder_attentions,
+            decoder_attention=outputs.decoder_attentions,
+            cross_attention=text_cross_attentions,
+            encoder_tokens=encoder_text[: len(encoder_text)],
+            decoder_tokens=decoder_text,
+            # display_mode="light",
+            html_action="return",
+        )
+
+        img = Image.open(image_dir).convert("RGB")
+        image_dirs = []
+
+        for i in range(len(outputs.cross_attentions[:1])):
+            image_dir = f"visualization/test_image_visualize_{i}.jpg"
+            image_dirs.append(image_dir)
+            attention_plot = np.mean(
+                outputs.cross_attentions[i][0, :, :, -197:].detach().numpy(), axis=0
+            )
+            plot_attention(img, decoder_text, attention_plot, image_dir)
+        return pred_answer, html_output.data, image_dirs
